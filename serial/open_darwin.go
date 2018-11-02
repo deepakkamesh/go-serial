@@ -27,11 +27,11 @@ package serial
 
 import (
 	"errors"
-	"io"
+	"fmt"
+	"os"
+	"syscall"
+	"unsafe"
 )
-import "os"
-import "syscall"
-import "unsafe"
 
 // termios types
 type cc_t byte
@@ -52,6 +52,8 @@ const (
 	kPARODD     = 0x00002000
 	kCCTS_OFLOW = 0x00010000
 	kCRTS_IFLOW = 0x00020000
+	kDTR_IFLOW  = 0x00040000
+	kDSR_OFLOW  = 0x00080000
 	kCRTSCTS    = kCCTS_OFLOW | kCRTS_IFLOW
 
 	kNCCS = 20
@@ -102,8 +104,55 @@ func setTermios(fd uintptr, src *termios) error {
 	if r1 != 0 {
 		return errors.New("Unknown error from SYS_IOCTL.")
 	}
-
 	return nil
+}
+
+// setBaudRate with the IOSSIOSPEED ioctl, to support non-standard speeds.
+func setBaudRate(file uintptr, baud uint) error {
+	r2, _, errno2 := syscall.Syscall(
+		syscall.SYS_IOCTL,
+		uintptr(file),
+		uintptr(kIOSSIOSPEED),
+		uintptr(unsafe.Pointer(&baud)))
+
+	if errno2 != 0 {
+		return os.NewSyscallError("SYS_IOCTL", errno2)
+	}
+
+	if r2 != 0 {
+		return errors.New("Unknown error from SYS_IOCTL.")
+	}
+	return nil
+}
+
+// SetDTR turns the DTR on/off.
+func (s *Port) SetDTR(b bool) error {
+	termCfg := s.termios.(termios)
+
+	if b {
+		termCfg.c_cflag |= kDTR_IFLOW
+	}
+	if err := setTermios(s.f.Fd(), &termCfg); err != nil {
+		return err
+	}
+
+	if err := setBaudRate(s.f.Fd(), s.options.BaudRate); err != nil {
+		return err
+	}
+	return nil
+}
+
+// Satisfy the SerialPort Interface.
+func (s *Port) Write(p []byte) (n int, err error) {
+	return s.f.Write(p)
+}
+
+func (s *Port) Close() error {
+	return s.f.Close()
+}
+
+func (s *Port) Read(p []byte) (n int, err error) {
+	return s.f.Read(p)
 }
 
 func convertOptions(options OpenOptions) (*termios, error) {
@@ -196,7 +245,7 @@ func convertOptions(options OpenOptions) (*termios, error) {
 	return &result, nil
 }
 
-func openInternal(options OpenOptions) (io.ReadWriteCloser, error) {
+func openInternal(options OpenOptions) (SerialPort, error) {
 	// Open the serial port in non-blocking mode, since otherwise the OS will
 	// wait for the CARRIER line to be asserted.
 	file, err :=
@@ -237,22 +286,15 @@ func openInternal(options OpenOptions) (io.ReadWriteCloser, error) {
 	}
 
 	if !IsStandardBaudRate(options.BaudRate) {
-		// Set baud rate with the IOSSIOSPEED ioctl, to support non-standard speeds.
-		r2, _, errno2 := syscall.Syscall(
-			syscall.SYS_IOCTL,
-			uintptr(file.Fd()),
-			uintptr(kIOSSIOSPEED),
-			uintptr(unsafe.Pointer(&options.BaudRate)))
-
-		if errno2 != 0 {
-			return nil, os.NewSyscallError("SYS_IOCTL", errno2)
-		}
-
-		if r2 != 0 {
-			return nil, errors.New("Unknown error from SYS_IOCTL.")
+		if err := setBaudRate(file.Fd(), options.BaudRate); err != nil {
+			return nil, fmt.Errorf("failed to set non-standard baud:%v", err)
 		}
 	}
 
 	// We're done.
-	return file, nil
+	return &Port{
+		f:       file,
+		termios: *terminalOptions,
+		options: options,
+	}, nil
 }

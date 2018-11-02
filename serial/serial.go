@@ -20,6 +20,7 @@ package serial
 import (
 	"io"
 	"math"
+	"os"
 )
 
 // Valid parity values.
@@ -64,6 +65,19 @@ var (
 // Some operating systems may support non-standard baud-rates (OSX) via
 // additional IOCTL.
 func IsStandardBaudRate(baudRate uint) bool { return StandardBaudRates[baudRate] }
+
+// SerialPort is the interface returned by package.
+type SerialPort interface {
+	io.ReadWriteCloser
+	SetDTR(bool) error
+}
+
+// Port is the struct for the serial port.
+type Port struct {
+	f       *os.File
+	termios interface{}
+	options OpenOptions
+}
 
 // OpenOptions is the struct containing all of the options necessary for
 // opening a serial port.
@@ -160,7 +174,7 @@ type OpenOptions struct {
 }
 
 // Open creates an io.ReadWriteCloser based on the supplied options struct.
-func Open(options OpenOptions) (io.ReadWriteCloser, error) {
+func Open(options OpenOptions) (SerialPort, error) {
 	// Redirect to the OS-specific function.
 	return openInternal(options)
 }
