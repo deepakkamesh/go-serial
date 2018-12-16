@@ -2,11 +2,11 @@ package serial
 
 import (
 	"errors"
-	"io"
 	"os"
 	"syscall"
 	"unsafe"
 
+	"github.com/pkg/term/termios"
 	"golang.org/x/sys/unix"
 )
 
@@ -48,7 +48,7 @@ type termios2 struct {
 	c_ospeed speed_t     // output speed
 }
 
-// Constants for RS485 operation
+// Constants
 
 const (
 	sER_RS485_ENABLED        = (1 << 0)
@@ -63,6 +63,27 @@ type serial_rs485 struct {
 	delay_rts_before_send uint32
 	delay_rts_after_send  uint32
 	padding               [5]uint32
+}
+
+// Satisfy the SerialPort Interface.
+func (s *Port) Write(p []byte) (n int, err error) {
+	return s.f.Write(p)
+}
+func (s *Port) Close() error {
+	return s.f.Close()
+}
+func (s *Port) Read(p []byte) (n int, err error) {
+	return s.f.Read(p)
+}
+
+// SetDTR turns the DTR on/off.
+func (s *Port) SetDTR(b bool) error {
+
+	bits := syscall.TIOCM_DTR
+	if b {
+		return termios.Tiocmbis(s.f.Fd(), &bits)
+	}
+	return termios.Tiocmbic(s.f.Fd(), &bits)
 }
 
 //
@@ -138,7 +159,28 @@ func makeTermios2(options OpenOptions) (*termios2, error) {
 	return t2, nil
 }
 
-func openInternal(options OpenOptions) (io.ReadWriteCloser, error) {
+// setTermios updates the termios struct associated with a serial port file
+// descriptor. This sets appropriate options for how the OS interacts with the
+// port.
+func setTermios(fd uintptr, src *termios2) error {
+	r, _, errno := syscall.Syscall(
+		syscall.SYS_IOCTL,
+		uintptr(fd),
+		uintptr(kTCSETS2),
+		uintptr(unsafe.Pointer(src)))
+
+	if errno != 0 {
+		return os.NewSyscallError("SYS_IOCTL", errno)
+	}
+
+	if r != 0 {
+		return errors.New("unknown error from SYS_IOCTL")
+	}
+
+	return nil
+}
+
+func openInternal(options OpenOptions) (SerialPort, error) {
 
 	file, openErr :=
 		os.OpenFile(
@@ -160,18 +202,9 @@ func openInternal(options OpenOptions) (io.ReadWriteCloser, error) {
 		return nil, optErr
 	}
 
-	r, _, errno := syscall.Syscall(
-		syscall.SYS_IOCTL,
-		uintptr(file.Fd()),
-		uintptr(kTCSETS2),
-		uintptr(unsafe.Pointer(t2)))
-
-	if errno != 0 {
-		return nil, os.NewSyscallError("SYS_IOCTL", errno)
-	}
-
-	if r != 0 {
-		return nil, errors.New("unknown error from SYS_IOCTL")
+	err := setTermios(file.Fd(), t2)
+	if err != nil {
+		return nil, err
 	}
 
 	if options.Rs485Enable {
@@ -205,5 +238,9 @@ func openInternal(options OpenOptions) (io.ReadWriteCloser, error) {
 		}
 	}
 
-	return file, nil
+	return &Port{
+		f:       file,
+		termios: *t2,
+		options: options,
+	}, nil
 }
